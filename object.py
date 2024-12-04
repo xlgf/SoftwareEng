@@ -4,118 +4,95 @@ from datetime import datetime
 from typing import Dict, List
 
 
-class CameraData:
-    def __init__(self, camera_id: int, timestamp: datetime, vehicle_count: int, vehicle_types: Dict[str, int], traffic_density: float):
-        self.camera_id = camera_id
-        self.timestamp = timestamp
-        self.vehicle_count = vehicle_count
-        self.vehicle_types = vehicle_types
-        self.traffic_density = traffic_density
-        
-        
-        
-class Camera:
-    def __init__(self, id: int, resolution: str, frame_rate: float, camera_source: str):
-       
-        self.id = id
-        self.resolution = resolution
-        self.frame_rate = frame_rate
-        self.camera_source = camera_source  
-        
-      
-        self.capture = cv2.VideoCapture(camera_source)
-      
-        width, height = map(int, resolution.split('x'))
-        self.capture.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-        self.capture.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-        self.capture.set(cv2.CAP_PROP_FPS, frame_rate)
-        
-        
-    def capture_frame(self):
+class VehicleDetector:
+    def __init__(self, model_path='yolov3.weights', config_path='yolov3.cfg', confidence_threshold=0.5):
         """
-        Captures a frame from the camera feed.
-        :return: Captured frame (image) or None if unable to capture.
+        Initialize the Vehicle Detector with YOLO model.
+        
+        :param model_path: Path to pre-trained YOLO weights
+        :param config_path: Path to YOLO configuration file
+        :param confidence_threshold: Minimum confidence for detection
         """
-        ret, frame = self.capture.read()
-        if ret:
-            return frame
-        else:
-            print("Failed to capture frame")
-            return None
-
-    def detect_vehicles(self, frame) -> int:
+        # Load YOLO
+        self.net = cv2.dnn.readNet(model_path, config_path)
+        
+        # Load class names
+        with open('coco.names', 'r') as f:
+            self.classes = [line.strip() for line in f.readlines()]
+        
+        # Vehicle types to track
+        self.vehicle_types = ['car', 'truck', 'bus', 'motorcycle', 'bicycle']
+        
+        # Confidence threshold
+        self.confidence_threshold = confidence_threshold
     
-        # Example using dummy data: Assuming vehicle count is 10
-        vehicle_count = 10
-        print(f"Detected {vehicle_count} vehicles.")
-        return vehicle_count
-
-    def estimate_traffic_density(self, vehicle_count: int, frame) -> float:
-      
-        frame_area = frame.shape[0] * frame.shape[1]  # height * width
-        density = vehicle_count / frame_area
-        print(f"Estimated traffic density: {density}")
-        return density
-
-    def classify_vehicle_types(self, frame) -> Dict[str, int]:
-      
-        # Placeholder
-        vehicle_types = {
-            'car': 8,
-            'truck': 1,
-            'bus': 1
-        }
-        print(f"Classified vehicle types: {vehicle_types}")
-        return vehicle_types
-
-    def process_camera_feed(self) -> CameraData:
+    def detect_vehicles(self, frame):
+        """
+        Detect vehicles in a single frame.
         
-        frame = self.capture_frame()
-        if frame is None:
-            return None 
-
+        :param frame: Input video frame
+        :return: List of detected vehicle information
+        """
+        height, width, _ = frame.shape
         
-        vehicle_count = self.detect_vehicles(frame)
-
-
-        traffic_density = self.estimate_traffic_density(vehicle_count, frame)
-
-
-        vehicle_types = self.classify_vehicle_types(frame)
-
-        camera_data = CameraData(
-            camera_id=self.id,
-            timestamp=datetime.now(),
-            vehicle_count=vehicle_count,
-            vehicle_types=vehicle_types,
-            traffic_density=traffic_density
-        )
-
-        return camera_data
-
-    def release(self):
-      
-        self.capture.release()
-        cv2.destroyAllWindows()
+        # Create blob from frame
+        blob = cv2.dnn.blobFromImage(frame, 0.00392, (416, 416), (0, 0, 0), True, crop=False)
         
+        # Set input to the network
+        self.net.setInput(blob)
         
+        # Get output layer names
+        output_layers_names = self.net.getUnconnectedOutLayersNames()
         
-               
-if __name__ == "__main__":
-    camera = Camera(id=1, resolution='1920x1080', frame_rate=30, camera_source=0)  # 0 for default webcam
-
-    try:
-        while True:
-            camera_data = camera.process_camera_feed()
-            if camera_data:
-                print(f"Camera ID: {camera_data.camera_id}")
-                print(f"Timestamp: {camera_data.timestamp}")
-                print(f"Vehicle Count: {camera_data.vehicle_count}")
-                print(f"Vehicle Types: {camera_data.vehicle_types}")
-                print(f"Traffic Density: {camera_data.traffic_density}")
-
-            # Break the loop with 'q' key
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-    finally:
-        camera.release()
+        # Forward pass through the network
+        layer_outputs = self.net.forward(output_layers_names)
+        
+        # Lists to store detected vehicles
+        vehicles = []
+        
+        # Process detection results
+        for output in layer_outputs:
+            for detection in output:
+                scores = detection[5:]
+                class_id = np.argmax(scores)
+                confidence = scores[class_id]
+                
+                # Get class name
+                class_name = self.classes[class_id]
+                
+                # Filter for vehicles with high confidence
+                if confidence > self.confidence_threshold and class_name in self.vehicle_types:
+                    # Object detected is a vehicle
+                    center_x = int(detection[0] * width)
+                    center_y = int(detection[1] * height)
+                    w = int(detection[2] * width)
+                    h = int(detection[3] * height)
+                    
+                    # Rectangle coordinates
+                    x = int(center_x - w / 2)
+                    y = int(center_y - h / 2)
+                    
+                    vehicles.append({
+                        'type': class_name,
+                        'bbox': [x, y, w, h],
+                        'confidence': float(confidence)
+                    })
+        
+        return vehicles
+    
+    def draw_vehicle_detections(self, frame, vehicles):
+        """
+        Draw bounding boxes and labels for detected vehicles.
+        
+        :param frame: Input frame
+        :param vehicles: List of detected vehicles
+        :return: Frame with vehicle detections drawn
+        """
+        for vehicle in vehicles:
+            x, y, w, h = vehicle['bbox']
+            cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+            cv2.putText(frame, f"{vehicle['type']} ({vehicle['confidence']:.2f})", 
+                        (x, y-10), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+        
+        return frame
